@@ -1,0 +1,7 @@
+cloudant
+python-json-config
+click
+# ../passify/
+python-editor
+shortid
+PyYAML
