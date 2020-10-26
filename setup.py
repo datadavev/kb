@@ -12,7 +12,15 @@ setup(
     entry_points = {
         'console_scripts': [
             'kb = kb:main',
-            'ccouch = ccouch:main',
+            #'ccouch = ccouch:main',
         ]
-    }
+    },
+    install_requires=[
+        "cloudant",
+        "python-json-config",
+        "click",
+        "python-editor",
+        "shortid",
+        "PyYAML",
+    ]
 )
