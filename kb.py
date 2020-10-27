@@ -11,6 +11,9 @@ import editor
 import yaml
 import click
 from python_json_config import ConfigBuilder
+import rich.console
+import rich.markdown
+import rich.syntax
 
 LOG_LEVELS = {
     "DEBUG": logging.DEBUG,
@@ -24,32 +27,64 @@ LOG_LEVELS = {
 LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 LOG_FORMAT = "%(asctime)s %(name)s:%(levelname)s: %(message)s"
 
-DEFAULT_CONFIG = {
-    "couch_url":"http://localhost:5984",
-    "database":"knowledge_base",
-    "entitybase":"entities",
-    "username":"",
-    "password":""
+
+class IdentifierNormalize(object):
+    def join(self, k, v):
+        return f"{k}:{v}"
+
+    def split(self, s):
+        return s.split(":", 1)
+
+    def normalize(self, idv):
+        return idv.strip()
+
+
+class KBIdentifierNormalize(IdentifierNormalize):
+    def join(self, k, v):
+        return f"{k.strip().upper()}:{v.strip()}"
+
+    def split(self, s):
+        parts = s.split(":", 1)
+        return (parts[0].strip(), parts[1].strip())
+
+    def normalize(self, idv):
+        parts = self.split(idv)
+        if len(parts) > 0:
+            return self.join(parts[0], parts[1])
+        return self.join("KB", idv)
+
+
+IDENTIFIER_SCHEMES = {
+    "KB": KBIdentifierNormalize,
 }
 
+DEFAULT_CONFIG = {
+    "couch_url": "http://localhost:5984",
+    "database": "knowledge_base",
+    "entitybase": "entities",
+    "username": "",
+    "password": "",
+}
+
+
 def getLogger():
-    return logging.getLogger('KB')
+    return logging.getLogger("KB")
+
 
 def loadConfiguration(config_path=None):
     if config_path is None:
         config_path = os.path.expanduser("~/.config/kb/kb.conf")
     builder = ConfigBuilder()
-    builder.couch_url = DEFAULT_CONFIG['couch_url']
-    builder.database = DEFAULT_CONFIG['database']
-    builder.entitybase = DEFAULT_CONFIG['entitybase']
-    builder.username = DEFAULT_CONFIG['username']
-    builder.password = DEFAULT_CONFIG['password']
+    builder.couch_url = DEFAULT_CONFIG["couch_url"]
+    builder.database = DEFAULT_CONFIG["database"]
+    builder.entitybase = DEFAULT_CONFIG["entitybase"]
+    builder.username = DEFAULT_CONFIG["username"]
+    builder.password = DEFAULT_CONFIG["password"]
     config = builder.parse_config(config_path)
     return config
 
 
 class KBManager(object):
-
     def __init__(self, config):
         self._L = getLogger()
         self.config = config
@@ -61,9 +96,7 @@ class KBManager(object):
         self._L.debug(str(self.config))
         if self.client is None:
             self.client = cloudant.client.CouchDB(
-                self.config.username,
-                self.config.password,
-                url=self.config.couch_url
+                self.config.username, self.config.password, url=self.config.couch_url
             )
             self.client.connect()
 
@@ -83,19 +116,16 @@ class KBManager(object):
             db = self.client.create_database(self.config.database)
         return db
 
-
     def createRecord(self, record):
         db = self.getKB()
         return db.create_document(record)
 
-
     def listTags(self):
         db = self.getKB()
-        options = {"group":True}
-        for row in db.get_view_result("uniqueTags", 'tags', **options):
-            #print(row.get('key',''))
+        options = {"group": True}
+        for row in db.get_view_result("uniqueTags", "tags", **options):
+            # print(row.get('key',''))
             print(row)
-
 
     def listRecords(self, match_context=None, match_tags=None, match_text=None):
         db = self.getKB()
@@ -104,7 +134,6 @@ class KBManager(object):
                 if isinstance(doc, cloudant.design_document.DesignDocument):
                     continue
                 print(f"{doc['_id']} {doc['context']} {' | '.join(doc['tags'])}")
-
 
     def deleteRecord(self, rid):
         db = self.getKB()
@@ -115,7 +144,6 @@ class KBManager(object):
             return
         if not doc is None:
             doc.delete()
-
 
     def editRecord(self, rid):
         db = self.getKB()
@@ -144,20 +172,59 @@ class KBManager(object):
                     meta_end = line_no
                     break
             line_no += 1
-        meta_part = "\n".join(content[meta_start+1 : meta_end-1])
-        document = "\n".join(content[meta_end+1:])
+        meta_part = "\n".join(content[meta_start + 1 : meta_end - 1])
+        document = "\n".join(content[meta_end + 1 :])
         meta = yaml.load(meta_part, Loader=yaml.Loader)
-        for k,v in meta.items():
+        for k, v in meta.items():
             doc[k] = v
         doc["message"] = document
         print(str(meta))
         print(doc["message"])
         doc.save()
 
+    def showRecord(self, rid):
+        db = self.getKB()
+        try:
+            doc = db[rid]
+            if isinstance(doc, cloudant.design_document.DesignDocument):
+                self._L.error("Specified document id '%s' is a design document", rid)
+                return
+            console = rich.console.Console()
+            print("---")
+            fm = {}
+            fm['id'] = doc['_id']
+            fm['hostname'] = doc['hostname']
+            fm['context'] = doc['context']
+            fm['tags'] = doc['tags']
+            console.print(rich.syntax.Syntax(yaml.dump(fm), "yaml", theme="emacs"))
+            print("---")
+            console.print(rich.markdown.Markdown(doc["message"]))
+        except Exception as e:
+            self._L.error(e)
+            return
 
-    def generateIdentifier(self, prefix="kb"):
-        res = f"{prefix}:{self._shortid.generate()}"
+    def generateIdentifier(self):
+        res = self._shortid.generate()
         return res
+
+
+def identifierFromInput(identifier):
+    if not identifier is None:
+        # Does it smell like scheme:value?
+        parts = identifier.split(":", 1)
+        if len(parts) > 1:
+            prefix = parts[0].strip().upper()
+            # recognized scheme?
+            if prefix in IDENTIFIER_SCHEMES.keys():
+                # assert identifier formatting
+                identifier = f"{prefix}:{parts[1]}"
+            # Nope, assume that it's just a colon in an identifier
+            # Nothing to see here, move right along.
+        else:
+            # Default to use KB
+            identifier = f"KB:{identifier}"
+    return identifier
+
 
 @click.group(invoke_without_command=True)
 @click.option(
@@ -167,12 +234,7 @@ class KBManager(object):
     help="Specify logging level",
     show_default=True,
 )
-@click.option(
-    "-c",
-    "--context",
-    default=os.path.abspath("."),
-    help="Context of entry"
-)
+@click.option("-c", "--context", default=os.path.abspath("."), help="Context of entry")
 @click.pass_context
 def main(ctx, verbosity, context):
     ctx.ensure_object(dict)
@@ -186,61 +248,80 @@ def main(ctx, verbosity, context):
     if verbosity not in LOG_LEVELS.keys():
         L.warning("%s is not a log level, set to INFO", verbosity)
     config = loadConfiguration()
-    ctx.obj['kb'] = KBManager(config)
-    ctx.obj['L'] = L
-    ctx.obj['context'] = context
+    ctx.obj["kb"] = KBManager(config)
+    ctx.obj["L"] = L
+    ctx.obj["context"] = context
     if ctx.invoked_subcommand is None:
-        ctx.invoke(list_tags)
+        ctx.invoke(list_entries)
     return
 
 
-@main.command(name='tags')
+@main.command(name="tags")
 @click.pass_context
 def list_tags(ctx):
-    kb = ctx.obj.get('kb')
+    kb = ctx.obj.get("kb")
     kb.listTags()
 
-@main.command(name='list')
+
+@main.command(name="list")
 @click.pass_context
 def list_entries(ctx):
-    kb = ctx.obj.get('kb')
+    kb = ctx.obj.get("kb")
     kb.listRecords()
 
-@main.command(name='edit')
+
+@main.command(name="show")
+@click.pass_context
+@click.argument("identifier")
+def show_entry(ctx, identifier):
+    L = ctx.obj["L"]
+    L.debug("show")
+    kb = ctx.obj.get("kb")
+    kb.showRecord(identifier)
+
+@main.command(name="edit")
 @click.pass_context
 @click.argument("identifier", default=None)
 def edit_entry(ctx, identifier):
-    kb = ctx.obj.get('kb')
+    kb = ctx.obj.get("kb")
     if identifier is None:
-        ctx.obj['L'].error("Entry identifier is required.")
+        ctx.obj["L"].error("Entry identifier is required.")
         return 1
     kb.editRecord(identifier.strip())
     return 0
 
-@main.command(name='delete')
+
+@main.command(name="delete")
 @click.pass_context
 @click.argument("identifier", default=None)
 def edit_entry(ctx, identifier):
-    kb = ctx.obj.get('kb')
+    kb = ctx.obj.get("kb")
     if identifier is None:
-        ctx.obj['L'].error("Entry identifier is required.")
+        ctx.obj["L"].error("Entry identifier is required.")
         return 1
     kb.deleteRecord(identifier.strip())
     return 0
 
-@main.command(name='create')
+
+@main.command(name="create")
 @click.pass_context
-@click.option('-t','--tags', help='Tag for entry (multiple allowed)', multiple=True, default=['general'])
-@click.argument('message', default='')
+@click.option(
+    "-t",
+    "--tags",
+    help="Tag for entry (multiple allowed)",
+    multiple=True,
+    default=["general"],
+)
+@click.argument("message", default="")
 def create_entry(ctx, tags, message):
-    kb = ctx.obj.get('kb')
-    L = ctx.obj['L']
+    kb = ctx.obj.get("kb")
+    L = ctx.obj["L"]
     res = {
         "_id": kb.generateIdentifier(),
-        "hostname":subprocess.check_output(['hostname','-f']).decode().strip(),
+        "hostname": subprocess.check_output(["hostname", "-f"]).decode().strip(),
         "user": getpass.getuser(),
         "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        "context": ctx.obj['context'],
+        "context": ctx.obj["context"],
         "tags": tags,
         "message": message,
     }
@@ -248,6 +329,7 @@ def create_entry(ctx, tags, message):
     res = kb.createRecord(res)
     kb.editRecord(res["_id"])
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())

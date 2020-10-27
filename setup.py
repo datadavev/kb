@@ -22,5 +22,6 @@ setup(
         "python-editor",
         "shortid",
         "PyYAML",
+        "rich",
     ]
 )
